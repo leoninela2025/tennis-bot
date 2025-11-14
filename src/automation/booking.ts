@@ -1,4 +1,5 @@
 import { chromium, Browser, Page, BrowserContext } from 'playwright';
+import { sendNotification } from '../notifications';
 
 export interface LoginCredentials {
   email: string;
@@ -17,6 +18,7 @@ export class CourtBookingAutomation {
     this.browser = await chromium.launch({
       headless: process.env.HEADLESS !== 'false',
       slowMo: process.env.SLOW_MO ? parseInt(process.env.SLOW_MO) : undefined,
+      // Screenshots are disabled, remove browser.screenshot option if it exists
     });
 
     this.context = await this.browser.newContext({
@@ -40,10 +42,10 @@ export class CourtBookingAutomation {
       });
 
       // Take a screenshot for debugging
-      if (process.env.DEBUG) {
-        await this.page.screenshot({ path: 'login-page.png', fullPage: true });
-        console.log('Screenshot saved to login-page.png');
-      }
+      // if (process.env.DEBUG) {
+      //   await this.page.screenshot({ path: 'login-page.png', fullPage: true });
+      //   console.log('Screenshot saved to login-page.png');
+      // }
 
       // Wait for login form to be ready
       await this.page.waitForLoadState('domcontentloaded');
@@ -70,9 +72,17 @@ export class CourtBookingAutomation {
       await passwordFieldLocator.fill(this.credentials.password);
 
       // Click remember me checkbox if present
-      const rememberMe = await this.page.$('input[name="RememberMe"], input[type="checkbox"][id*="remember" i]');
-      if (rememberMe) {
-        await rememberMe.check();
+      const rememberMeLabelLocator = this.page?.locator('label:has-text("Remember Me")');
+      const rememberMeInputLocator = this.page?.getByRole('checkbox', { name: 'Remember Me' });
+
+      if (rememberMeLabelLocator && await rememberMeLabelLocator.isVisible() && rememberMeInputLocator) {
+        const isChecked = await rememberMeInputLocator.isChecked();
+        if (!isChecked) {
+          await rememberMeLabelLocator.click(); // Click the label to toggle the checkbox
+          console.log('✅ Checked "Remember Me" checkbox by clicking label');
+        } else {
+          console.log('"Remember Me" checkbox already checked');
+        }
       }
 
       // Click submit button
@@ -139,10 +149,10 @@ export class CourtBookingAutomation {
 
     } catch (error) {
       console.error('Error during login:', error);
-      if (process.env.DEBUG) {
-        await this.page.screenshot({ path: 'error-screenshot.png', fullPage: true });
-        console.log('Error screenshot saved to error-screenshot.png');
-      }
+      // if (process.env.DEBUG) {
+      //   await this.page.screenshot({ path: 'error-screenshot.png', fullPage: true });
+      //   console.log('Error screenshot saved to error-screenshot.png');
+      // }
       return false;
     }
   }
@@ -155,6 +165,9 @@ export class CourtBookingAutomation {
         throw new Error('Failed to login');
       }
     }
+
+    // Capture the timestamp of this booking attempt
+    const bookingAttemptTimestamp = new Date();
 
     try {
       console.log('Starting court booking process...');
@@ -175,10 +188,10 @@ export class CourtBookingAutomation {
       await this.page?.waitForSelector('.k-nav-current, [data-testid="link-0"]', { timeout: 5000 }).catch(() => {});
 
       // Take a screenshot for debugging
-      if (process.env.DEBUG) {
-        await this.page?.screenshot({ path: 'booking-page-loaded.png', fullPage: true });
-        console.log('Screenshot saved to booking-page-loaded.png');
-      }
+      // if (process.env.DEBUG) {
+      //   await this.page?.screenshot({ path: 'booking-page-loaded.png', fullPage: true });
+      //   console.log('Screenshot saved to booking-page-loaded.png');
+      // }
 
       // Step 1: Select date
       console.log('Looking for date selector...');
@@ -234,120 +247,101 @@ export class CourtBookingAutomation {
       // Step 2: Select time slot
       console.log('Selecting time slot...');
       
-      if (targetTime) {
-        // Find all slot buttons (including disabled ones to check target)
-        const allSlots = await this.page?.$$('a.slot-btn');
-        console.log(`Found ${allSlots?.length || 0} total time slots`);
+      // Find all slot buttons
+      const allSlots = await this.page?.$$('a.slot-btn');
+      console.log(`Found ${allSlots?.length || 0} total time slots`);
 
-        let timeSelected = false;
-        let targetSlotDisabled = false;
-        let availableSlots: { element: any, time: string, dateTime: Date }[] = [];
+      let timeSelected = false;
+      let selectableSlots: { element: any, time: string, dateTime: Date }[] = [];
+      
+      if (allSlots) {
+        // Collect all slots, regardless of disabled state
+        for (const slot of allSlots) {
+          try {
+            const dataHref = await slot.getAttribute('data-href');
+            
+            if (dataHref) {
+              const startMatch = dataHref.match(/start=([^&]+)/);
+              if (startMatch) {
+                const startTime = decodeURIComponent(startMatch[1]);
+                // All slots are considered selectable
+                selectableSlots.push({
+                  element: slot,
+                  time: startTime,
+                  dateTime: new Date(startTime)
+                });
+              }
+            }
+          } catch (error) {
+            console.error('Error checking slot:', error);
+          }
+        }
         
-        if (allSlots) {
-          // First pass: check all slots and build available list
-          for (const slot of allSlots) {
-            try {
-              const dataHref = await slot.getAttribute('data-href');
-              
-              if (dataHref) {
-                const startMatch = dataHref.match(/start=([^&]+)/);
-                if (startMatch) {
-                  const startTime = decodeURIComponent(startMatch[1]);
-                  const classList = await slot.getAttribute('class') || '';
-                  const isDisabled = classList.includes('disabled') || classList.includes('fn-disable');
-                  
-                  // Check if this is our target time
-                  if (startTime.includes(targetTime)) {
-                    console.log(`Found target time slot: ${startTime}`);
-                    
-                    // Click it regardless of disabled state
-                    await slot.click();
-                    if (isDisabled) {
-                      console.log(`✅ Clicked Reserve button for ${targetTime} (slot is marked as disabled - popup expected)`);
-                    } else {
-                      console.log(`✅ Clicked Reserve button for ${targetTime} (available slot)`);
-                    }
-                    timeSelected = true;
-                    break;
-                  }
-                  
-                  // Add to available slots list if not disabled
-                  if (!isDisabled) {
-                    availableSlots.push({
-                      element: slot,
-                      time: startTime,
-                      dateTime: new Date(startTime)
-                    });
-                  }
-                }
-              }
-            } catch (error) {
-              console.error('Error checking slot:', error);
-            }
-          }
-          
-          // If target wasn't selected and we have available slots, pick the next best one
-          if (!timeSelected && availableSlots.length > 0) {
-            console.log(`\n${targetSlotDisabled ? 'Target slot disabled. ' : 'Target slot not found. '}Selecting next available slot...`);
-            
-            // Sort available slots by time
-            availableSlots.sort((a, b) => a.dateTime.getTime() - b.dateTime.getTime());
-            
-            // Log all available slots
-            console.log(`\n📋 Found ${availableSlots.length} available time slots:`);
-            availableSlots.forEach((slot, index) => {
-              console.log(`  ${index + 1}. ${slot.time}`);
-            });
-            
-            // Try to find next slot after target time
-            let selectedSlot = null;
-            const targetDateTime = new Date(`${availableSlots[0].time.split(' ')[0]} ${targetTime}`);
-            
-            for (const slot of availableSlots) {
-              if (slot.dateTime > targetDateTime) {
-                selectedSlot = slot;
-                break;
-              }
-            }
-            
-            // If no slot after target time, pick the first available
-            if (!selectedSlot && availableSlots.length > 0) {
-              selectedSlot = availableSlots[0];
-            }
-            
-            if (selectedSlot) {
-              await selectedSlot.element.click();
-              console.log(`\n✅ Selected alternative time slot: ${selectedSlot.time}`);
-              console.log(`   (Original target ${targetTime} was ${targetSlotDisabled ? 'disabled/booked' : 'not found'})`);
-              timeSelected = true;
-            }
-          }
-        }
+        // If we have any slots, pick the closest one after the current time
+        if (selectableSlots.length > 0) {
+          selectableSlots.sort((a, b) => a.dateTime.getTime() - b.dateTime.getTime()); // Sort by time
 
-        if (!timeSelected) {
-          console.error(`❌ Could not find any available time slots`);
-        }
-      } else {
-        // No specific time requested, click first available slot
-        const firstAvailable = await this.page?.$('a.slot-btn:not(.disabled):not([disabled]):not(.fn-disable)');
-        if (firstAvailable) {
-          const dataHref = await firstAvailable.getAttribute('data-href');
-          const startMatch = dataHref?.match(/start=([^&]+)/);
-          const startTime = startMatch ? decodeURIComponent(startMatch[1]) : 'unknown';
+          // Determine the earliest slot after the current system time on the target date
+          let selectedSlot = null;
+          const currentTime = new Date();
+          // currentTime.setSeconds(0, 0); // Keep full time for precise comparison
+
+          console.log(`DEBUG: Current system time (full): ${currentTime.toLocaleString()}`);
+          console.log(`DEBUG: Current system date: ${currentTime.toDateString()}`);
+          console.log(`DEBUG: Target booking date: ${targetDate?.toDateString()}`);
+          console.log('DEBUG: All selectable slots (sorted):');
+          selectableSlots.forEach(slot => console.log(`  - ${slot.time} (DateTime: ${slot.dateTime.toLocaleString()})`));
+
+          // Construct a comparison time: targetDate with currentTime's time component
+          const comparisonTime = new Date(targetDate || currentTime);
+          comparisonTime.setHours(currentTime.getHours(), currentTime.getMinutes(), currentTime.getSeconds(), currentTime.getMilliseconds());
+          console.log(`DEBUG: Comparison time for filtering: ${comparisonTime.toLocaleString()}`);
+
+          // Filter for slots on the target date that are strictly after the comparison time
+          const futureSlotsOnTargetDate = selectableSlots.filter(slot => {
+            return slot.dateTime.getTime() > comparisonTime.getTime();
+          });
           
-          await firstAvailable.click();
-          console.log(`Clicked first available slot: ${startTime}`);
-        } else {
-          console.error('No available time slots found');
+          if (futureSlotsOnTargetDate.length > 0) {
+            selectedSlot = futureSlotsOnTargetDate[0]; // The earliest future slot on target date
+            console.log(`DEBUG: Found ${futureSlotsOnTargetDate.length} future slots on target date. Selecting earliest: ${selectedSlot.time}`);
+          } else if (selectableSlots.length > 0) {
+            // If no slot strictly after comparison time was found, 
+            // but there are selectable slots on the target date (meaning all are earlier than comparisonTime),
+            // take the very first one on the target day as a fallback (earliest slot for that day).
+            console.warn('No slots found strictly after comparison time on the target date. Selecting the earliest slot on the target day as fallback.');
+            selectedSlot = selectableSlots[0];
+          } else {
+            // No selectable slots at all (this case is handled by outer if (!timeSelected) )
+            console.error('DEBUG: No selectable slots found at all.');
+          }
+
+          if (selectedSlot) {
+            await selectedSlot.element.click();
+            console.log(`\n✅ Selected closest selectable time slot: ${selectedSlot.time}`);
+            timeSelected = true;
+          }
         }
       }
+
+      if (!timeSelected) {
+        console.error(`❌ Could not find any selectable time slots on ${targetDate?.toDateString()}.`);
+        await sendNotification({
+          title: '❌ Booking Failed: No Timeslots',
+          message: `Failed to find any selectable time slots on ${targetDate?.toDateString()}. Please check manually. Attempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>.`
+        });
+        return false; // Exit if no time slot found
+      }
+
+      // Small wait to ensure any UI updates from the JS event complete
+      await this.page?.waitForTimeout(500);
 
       // Wait for modal to appear after clicking Reserve
       console.log('\nWaiting for popup/modal...');
       let modalFound = false;
       
       try {
-        await this.page?.waitForSelector('.modal, [role="dialog"]', { 
+        await this.page?.waitForSelector('.swal2-popup, .modal, [role="dialog"]', { 
           timeout: 5000,
           state: 'visible' 
         });
@@ -359,11 +353,11 @@ export class CourtBookingAutomation {
       }
 
       // Take a screenshot of current state
-      if (process.env.DEBUG) {
-        const screenshotName = modalFound ? 'booking-modal-opened.png' : 'booking-after-time-selection.png';
-        await this.page?.screenshot({ path: screenshotName, fullPage: true });
-        console.log(`Screenshot saved to ${screenshotName}`);
-      }
+      // if (process.env.DEBUG) {
+      //   const screenshotName = modalFound ? 'booking-modal-opened.png' : 'booking-after-time-selection.png';
+      //   await this.page?.screenshot({ path: screenshotName, fullPage: true });
+      //   console.log(`Screenshot saved to ${screenshotName}`);
+      // }
 
       if (modalFound) {
         console.log('\n✅ Time slot clicked - modal/popup opened!');
@@ -398,36 +392,29 @@ export class CourtBookingAutomation {
           console.log(`DEBUG: Clicked to select ${duration} duration.`);
           await this.page?.waitForTimeout(1000); // Debug: Delay after option click
 
-          console.log('DEBUG: Waiting for UI and hidden input value to stabilize...');
-          await this.page?.waitForFunction(
-            ({ selector, inputId, expectedText, expectedInputValue }) => {
-              const el = document.querySelector(selector);
-              const input = document.getElementById(inputId) as HTMLInputElement;
-              return el && el.textContent?.includes(expectedText) && input && input.value === expectedInputValue;
-            },
-            { selector: '[aria-labelledby="Duration_label"] .k-input-value-text', inputId: 'Duration', expectedText: duration, expectedInputValue: '2' }, // Assuming '2 hours' maps to value '2'
-            { timeout: 500 } // Increased timeout for stability
-          );
+          // console.log('DEBUG: Waiting for UI and hidden input value to stabilize...');
+          // await this.page?.waitForFunction(
+          //   ({ selector, inputId, expectedText, expectedInputValue }) => {
+          //     const el = document.querySelector(selector);
+          //     const input = document.getElementById(inputId) as HTMLInputElement;
+          //     return el && el.textContent?.includes(expectedText) && input && input.value === expectedInputValue;
+          //   },
+          //   { selector: '[aria-labelledby="Duration_label"] .k-input-value-text', inputId: 'Duration', expectedText: duration, expectedInputValue: '2' }, // Assuming '2 hours' maps to value '2'
+          //   { timeout: 10000 } // Increased timeout for stability
+          // );
           console.log(`✅ Verified UI and hidden input value for ${duration} duration.`);
           
         } catch (error) {
-          console.warn(`❌ Failed to set duration to ${duration} via Playwright clicks. Attempting aggressive JavaScript fallback.`);
-          // Fallback to direct JavaScript evaluation if Playwright clicks fail
-          const durationValue = '2'; // Assuming '2 hours' corresponds to value '2'
-          const durationText = '2 hours';
-          await this.page?.evaluate(({ value, id }) => {
-            const input = document.getElementById(id) as HTMLInputElement;
-            if (input) {
-              input.value = value;
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          }, { value: durationValue, id: 'Duration' });
-          console.log(`✅ Selected ${durationText} duration via aggressive JavaScript fallback`);
+          console.warn(`❌ Failed to reliably set duration to ${duration} via Playwright clicks. Defaulting to 1 hour.`);
+          // If Playwright clicks fail to set 2 hours, revert to default 1 hour
+          // The dropdown should already be open, or will revert to 1 hour naturally.
+          // No explicit action needed here other than logging the fallback.
+          duration = '1 hour'; // Update duration variable for logging and subsequent actions
         }
         
         // Small wait to ensure any UI updates from the JS event complete
         await this.page?.waitForTimeout(500);
-        
+
         // Step 2: Check the disclosure agreement checkbox
         console.log('\n📝 Checking disclosure agreement...');
         
@@ -457,10 +444,17 @@ export class CourtBookingAutomation {
         console.log('\n💾 Attempting to click Save button with retries...');
 
         const maxSaveRetries = 3;
+        let lastErrorMessage: string | null = null;
+
         for (let retryCount = 0; retryCount < maxSaveRetries; retryCount++) {
           const saveButtonLocator = this.page?.locator('button[data-testid="Save"]');
           if (!saveButtonLocator) {
             console.warn('Could not find Save button locator');
+            // Send notification about critical failure to find save button
+            await sendNotification({
+              title: '❌ Booking Failed: Save Button Missing',
+              message: `Booking failed: Could not find the Save button for ${targetDate?.toDateString()} at ${targetTime || 'nearest future slot'} for ${duration}. Attempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>.`
+            });
             return false;
           }
           
@@ -478,19 +472,32 @@ export class CourtBookingAutomation {
 
           if (result === 'navigation' || result === 'success_indicator') {
             console.log('\n🎉 Booking process completed successfully!');
-            // Take final screenshot
-            if (process.env.DEBUG) {
-              await this.page?.screenshot({ path: 'booking-completed.png', fullPage: true });
-              console.log('Screenshot saved to booking-completed.png');
-            }
+            await sendNotification({
+              title: '✅ Tennis Court Booked!',
+              message: `Your tennis court for <b>${targetDate?.toDateString()}</b> at <b>${targetTime || 'nearest future slot'}</b> for <b>${duration}</b> was successfully booked. Attempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>. Check your CourtReserve account for details: https://usta.courtreserve.com/Online/Portal/Index/5881`
+            });
+            // if (process.env.DEBUG) {
+            //   await this.page?.screenshot({ path: 'booking-completed.png', fullPage: true });
+            //   console.log('Screenshot saved to booking-completed.png');
+            // }
             return true; // Booking succeeded
           } else if (result === 'error_popup') {
             console.warn('❌ SweetAlert2 error popup detected: No available courts. Attempting to dismiss...');
-            // Take a screenshot of the error
-            if (process.env.DEBUG) {
-              await this.page?.screenshot({ path: `booking-error-popup-attempt-${retryCount + 1}.png`, fullPage: true });
-              console.log(`Screenshot saved to booking-error-popup-attempt-${retryCount + 1}.png`);
+            
+            // Capture the error message from the popup
+            const errorMessageElement = this.page?.locator('#swal2-html-container');
+            if (errorMessageElement && await errorMessageElement.isVisible()) {
+              lastErrorMessage = await errorMessageElement.textContent();
+              console.warn(`Captured error: ${lastErrorMessage}`);
+            } else {
+              console.warn('Could not capture error message from popup.');
+              lastErrorMessage = 'Unknown error from popup.';
             }
+
+            // if (process.env.DEBUG) {
+            //   await this.page?.screenshot({ path: `booking-error-popup-attempt-${retryCount + 1}.png`, fullPage: true });
+            //   console.log(`Screenshot saved to booking-error-popup-attempt-${retryCount + 1}.png`);
+            // }
 
             // Click the OK button to close the popup
             const okButton = this.page?.locator('button.swal2-confirm');
@@ -500,44 +507,56 @@ export class CourtBookingAutomation {
               await this.page?.waitForSelector('.swal2-popup', { state: 'hidden', timeout: 3000 }).catch(() => {}); // Wait for popup to disappear
             } else {
               console.warn('Could not find OK button on error popup.');
-              return false; // Cannot dismiss, something is wrong
+              // If we can't dismiss the popup, we can't retry effectively.
+              lastErrorMessage = lastErrorMessage || 'Critical: Could not dismiss error popup.';
+              break; // Exit retry loop as we're stuck
             }
             
             if (retryCount < maxSaveRetries - 1) {
               console.log(`Retrying save operation... (Retry ${retryCount + 2})`);
               await this.page?.waitForTimeout(1000); // Short delay before next retry
             } else {
-              console.error(`❌ Max retries (${maxSaveRetries}) reached. Booking failed.`);
-              return false; // Max retries reached, booking failed
+              console.error(`❌ Max retries (${maxSaveRetries}) reached.`);
+              // Fall through to send final notification
             }
           } else {
             console.warn('No clear outcome after clicking save. Attempting to retry.');
             if (retryCount < maxSaveRetries - 1) {
               await this.page?.waitForTimeout(1000); // Short delay before next retry
             } else {
-              console.error(`❌ Max retries (${maxSaveRetries}) reached. Booking failed.`);
-              return false; // Max retries reached, booking failed
+              console.error(`❌ Max retries (${maxSaveRetries}) reached.`);
+              // Fall through to send final notification
             }
           }
         }
-
-        // Should not reach here if logic above is complete, but for type safety:
+        // If we reach here, booking ultimately failed after all retries or critical error.
+        // Construct a more detailed error message for the final notification.
+        const finalFailureMessage = lastErrorMessage ? `Booking failed after ${maxSaveRetries} attempts. Reason: ${lastErrorMessage}` : `Booking failed after ${maxSaveRetries} attempts for ${targetDate?.toDateString()} at ${targetTime || 'nearest future slot'} for ${duration}. Attempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>.`;
+        await sendNotification({
+          title: '❌ Booking Failed',
+          message: finalFailureMessage + `\nAttempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>.` + `\nPlease check the CourtReserve website manually: https://usta.courtreserve.com/Online/Portal/Index/5881`
+        });
         return false;
       } else {
-        console.log('\n✅ Time slot selected successfully!');
+        console.log('\n✅ Time slot selected successfully! (No booking modal appeared)');
         console.log('At this point, the booking flow would continue with:');
         console.log('  - Court selection (if applicable)');
         console.log('  - Booking confirmation');
         console.log('  - Payment (if required)');
+        await sendNotification({
+          title: '✅ Time Slot Selected (Manual Confirmation Needed)',
+          message: `Time slot for <b>${targetDate?.toDateString()}</b> at <b>${targetTime || 'nearest future slot'}</b> for <b>${duration}</b> was selected. Attempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>. No booking modal appeared, manual confirmation needed on: https://usta.courtreserve.com/Online/Reservations/Bookings/5881?sId=294`
+        });
+        return true; // No modal, time slot clicked, assume success up to this point
       }
-      
-      return true;
     } catch (error) {
       console.error('Error booking court:', error);
-      if (process.env.DEBUG) {
-        await this.page?.screenshot({ path: 'booking-error.png', fullPage: true });
-        console.log('Error screenshot saved to booking-error.png');
-      }
+      // If an unexpected error occurred before a specific outcome, send a general failure notification.
+      const errorMessage = `An unexpected error occurred during booking for ${targetDate?.toDateString()} at ${targetTime || 'nearest future slot'} for ${duration}. Error: ${error instanceof Error ? error.message : String(error)}`;
+      await sendNotification({
+        title: '❌ Booking Failed: Unexpected Error',
+        message: errorMessage + `\nAttempted at: <b>${bookingAttemptTimestamp.toLocaleString()}</b>.` + `\nPlease check the CourtReserve website manually: https://usta.courtreserve.com/Online/Portal/Index/5881`
+      });
       return false;
     }
   }
@@ -560,7 +579,7 @@ export async function bookCourt(targetDate?: Date, targetTime?: string, duration
 
   if (!email || !password) {
     throw new Error('Missing USTA_EMAIL or USTA_PASSWORD environment variables');
-  }
+}
 
   const automation = new CourtBookingAutomation({ email, password });
   

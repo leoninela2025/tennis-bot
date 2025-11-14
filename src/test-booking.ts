@@ -22,13 +22,13 @@ async function testBooking() {
     const targetDate = new Date();
     targetDate.setDate(targetDate.getDate() + 2);
     
-    // You can test with different scenarios:
-    const targetTime = '8:30 AM'; // This might be disabled and open a popup
-    // const targetTime = '7:00 AM'; // This might be available directly
+    // To select the nearest future time from now, do not specify targetTime.
+    // The automation will automatically find the earliest slot after the current time.
+    // const targetTime = '8:30 AM'; // Remove this line
     const duration = '2 hours'; // Book for 2 hours
     
-    console.log(`Attempting to book for: ${targetDate.toDateString()} at ${targetTime} for ${duration}`);
-    const success = await automation.bookCourt(targetDate, targetTime, duration);
+    console.log(`Attempting to book for: ${targetDate.toDateString()} at nearest future time for ${duration}`);
+    const success = await automation.bookCourt(targetDate, undefined, duration);
 
     if (success) {
       console.log('✅ Booking test completed successfully!');
