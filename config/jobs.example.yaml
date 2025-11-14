@@ -1,0 +1,10 @@
+# Example booking jobs
+jobs:
+  - name: "Weekend Indoor"
+    facility: "Indoor"
+    court: "Court 4"
+    date: "2025-11-15"
+    startTime: "07:00"
+    durationMinutes: 60
+    players: 2
+    notify: true
